@@ -23,14 +23,14 @@ class JoinFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
 
-    def process_messsage(self, message, ack, nack):
+    def process_message(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        client_id, data = message_protocol.internal.deserialize(message)
+        self.output_queue.send(message_protocol.internal.serialize(client_id, data))
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        self.input_queue.start_consuming(self.process_message)
 
 
 def main():

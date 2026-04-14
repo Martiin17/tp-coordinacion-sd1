@@ -1,9 +1,10 @@
 import json
 
 
-def serialize(message):
-    return json.dumps(message).encode("utf-8")
+def serialize(client_id, data):
+    return json.dumps({"client_id": client_id, "data": data}).encode("utf-8")
 
 
 def deserialize(message):
-    return json.loads(message.decode("utf-8"))
+    parsed = json.loads(message.decode("utf-8"))
+    return parsed["client_id"], parsed["data"]
