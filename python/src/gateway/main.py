@@ -14,7 +14,7 @@ INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 
 
-def handle_client_request(client_socket, message_handler_instance):
+def handle_client_request(client_socket, message_handler):
     output_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
 
     try:
@@ -22,21 +22,21 @@ def handle_client_request(client_socket, message_handler_instance):
             message = message_protocol.external.recv_msg(client_socket)
 
             if message[0] == message_protocol.external.MsgType.FRUIT_RECORD:
-                serialized_message = message_handler_instance.serialize_data_message(message[1])
+                serialized_message = message_handler.serialize_data_message(message[1])
                 output_queue.send(serialized_message)
                 message_protocol.external.send_msg(
                     client_socket, message_protocol.external.MsgType.ACK
                 )
 
             if message[0] == message_protocol.external.MsgType.END_OF_RECODS:
-                serialized_message = message_handler_instance.serialize_eof_message(message[1])
+                serialized_message = message_handler.serialize_eof_message(message[1])
                 output_queue.send(serialized_message)
                 message_protocol.external.send_msg(
                     client_socket, message_protocol.external.MsgType.ACK
                 )
                 return
     except socket.error:
-        logging.error("The connection with the client was lost")
+        logging.error("The connection with the server was lost")
     except Exception as e:
         logging.error(e)
     finally:
@@ -47,29 +47,29 @@ def handle_client_response(client_list):
     input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
 
     def _consume_result(message, ack, nack):
+        client_index = 0
         try:
-            client_id, data = message_handler.MessageHandler(None).deserialize_result_message(message)
+            for [message_handler_instance, client_socket] in client_list:
+                deserialized_message = (
+                    message_handler_instance.deserialize_result_message(message)
+                )
 
-            if not data:
-                ack()
-                return
+                if not deserialized_message:
+                    client_index += 1
+                    continue
 
-            for entry in client_list:
-                if entry[0] == client_id:
-                    client_socket = entry[1]
-                    try:
-                        message_protocol.external.send_msg(
-                            client_socket,
-                            message_protocol.external.MsgType.FRUIT_TOP,
-                            data,
-                        )
-                        message_protocol.external.recv_msg(client_socket)
-                    except socket.error:
-                        logging.error(f"Connection lost with client {client_id}")
-                    finally:
-                        client_list.remove(entry)
-                    break
-
+                message_protocol.external.send_msg(
+                    client_socket,
+                    message_protocol.external.MsgType.FRUIT_TOP,
+                    deserialized_message,
+                )
+                message_protocol.external.recv_msg(client_socket)
+                break
+            client_list.pop(client_index)
+            ack()
+        except socket.error:
+            logging.error("The connection with the server was lost")
+            client_list.pop(client_index)
             ack()
         except Exception as e:
             logging.error(e)
@@ -90,12 +90,9 @@ def handle_sigterm(server_socket, client_list, sigterm_received):
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    next_client_id = multiprocessing.Value("i", 0)
-
     with multiprocessing.Manager() as manager:
         client_list = manager.list()
         sigterm_received = manager.Value("c_short", 0)
-
         with multiprocessing.Pool(processes=os.process_cpu_count()) as processes_pool:
             processes_pool.apply_async(handle_client_response, (client_list,))
 
@@ -112,14 +109,10 @@ def main():
                 while True:
                     try:
                         client_socket, _ = server_socket.accept()
+
                         logging.info("A new client has connected")
-
-                        with next_client_id.get_lock():
-                            client_id = next_client_id.value
-                            next_client_id.value += 1
-
-                        message_handler_instance = message_handler.MessageHandler(client_id)
-                        client_list.append([client_id, client_socket])
+                        message_handler_instance = message_handler.MessageHandler()
+                        client_list.append([message_handler_instance, client_socket])
                         processes_pool.apply_async(
                             handle_client_request,
                             (client_socket, message_handler_instance),
