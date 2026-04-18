@@ -17,7 +17,7 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class AggregationFilter:
 
     def __init__(self):
-        self.input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+        self.input_exchange = middleware.MessageMiddlewareExchangeConsumerRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
         )
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -25,6 +25,7 @@ class AggregationFilter:
         )
 
         self.fruit_top_by_client = {}
+        self.eof_count_by_client = {}
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
@@ -36,14 +37,21 @@ class AggregationFilter:
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
-        logging.info(f"Received EOF for client {client_id}")
+        logging.info(f"All {SUM_AMOUNT} EOFs received for client {client_id}, computing top")
         fruit_top = self.fruit_top_by_client.pop(client_id, [])
+        del self.eof_count_by_client[client_id]
+
         fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
-        top = list(
-            map(lambda fi: (fi.fruit, fi.amount), fruit_chunk)
-        )
+        top = list(map(lambda fi: (fi.fruit, fi.amount), fruit_chunk))
         self.output_queue.send(message_protocol.internal.serialize(client_id, top))
+
+    def _handle_eof(self, client_id):
+        count = self.eof_count_by_client.get(client_id, 0) + 1
+        self.eof_count_by_client[client_id] = count
+        logging.info(f"EOF {count}/{SUM_AMOUNT} for client {client_id}")
+        if count == SUM_AMOUNT:
+            self._process_eof(client_id)
 
     def process_message(self, message, ack, nack):
         logging.info("Process message")
@@ -51,7 +59,7 @@ class AggregationFilter:
         if len(data) == 2:
             self._process_data(client_id, *data)
         else:
-            self._process_eof(client_id)
+            self._handle_eof(client_id)
         ack()
 
     def start(self):

@@ -1,3 +1,4 @@
+import logging
 import uuid
 from common import message_protocol
 
@@ -14,7 +15,11 @@ class MessageHandler:
         return message_protocol.internal.serialize(self.client_id, [])
 
     def deserialize_result_message(self, message):
-        res_client_id, data = message_protocol.internal.deserialize(message)
-        if res_client_id == self.client_id:
-            return data
-        return None
+        try:
+            res_client_id, data = message_protocol.internal.deserialize(message)
+            if res_client_id == self.client_id:
+                return data
+            return None
+        except Exception as e:
+            logging.error(f"deserialize_result_message error: {e}")
+            raise
