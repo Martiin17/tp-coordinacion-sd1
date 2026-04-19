@@ -1,7 +1,7 @@
 import os
 import logging
 import bisect
-
+import signal
 from common import middleware, message_protocol, fruit_item
 
 ID = int(os.environ["ID"])
@@ -17,6 +17,9 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class AggregationFilter:
 
     def __init__(self):
+        self.closed = False
+        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
+
         self.input_exchange = middleware.MessageMiddlewareExchangeConsumerRabbitMQ(
             MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{ID}"]
         )
@@ -26,6 +29,13 @@ class AggregationFilter:
 
         self.fruit_top_by_client = {}
         self.eof_count_by_client = {}
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.closed = True
+        self.input_exchange.stop_consuming()
+        if self._prev_sigterm_handler:
+            self._prev_sigterm_handler(signum, frame)
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")

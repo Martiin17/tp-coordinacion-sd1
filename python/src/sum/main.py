@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 from common import middleware, message_protocol, fruit_item
 
 ID = int(os.environ["ID"])
@@ -15,6 +16,9 @@ SUM_CONTROL_PREFIX = "SUM_CONTROL_QUEUE"
 
 class SumFilter:
     def __init__(self):
+        self.closed = False
+        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
+
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
@@ -39,6 +43,13 @@ class SumFilter:
             self.other_control_outputs.append(control_queue)
 
         self.amount_by_client_fruit = {}
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.closed = True
+        self.input_queue.stop_consuming()
+        if self._prev_sigterm_handler:
+            self._prev_sigterm_handler(signum, frame)
 
     def _aggregator_index(self, fruit):
         return sum(fruit.encode()) % AGGREGATION_AMOUNT
