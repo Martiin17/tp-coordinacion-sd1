@@ -29,14 +29,19 @@ class SumFilter:
             )
             self.data_output_exchanges.append((exchange, f"{AGGREGATION_PREFIX}_{i}"))
 
-        self.control_outputs = []
+        self.other_control_outputs = []
         for i in range(SUM_AMOUNT):
+            if i == ID:
+                continue
             control_queue = middleware.MessageMiddlewareQueueRabbitMQ(
                 MOM_HOST, f"{SUM_CONTROL_PREFIX}_{i}"
             )
-            self.control_outputs.append(control_queue)
+            self.other_control_outputs.append(control_queue)
 
         self.amount_by_client_fruit = {}
+
+    def _aggregator_index(self, fruit):
+        return sum(fruit.encode()) % AGGREGATION_AMOUNT
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Process data")
@@ -51,13 +56,14 @@ class SumFilter:
         items_to_send = [(k, self.amount_by_client_fruit[k]) for k in keys_to_send]
 
         for _, final_fruit_item in items_to_send:
-            for exchange, r_key in self.data_output_exchanges:
-                exchange.send(
-                    message_protocol.internal.serialize(
-                        client_id, [final_fruit_item.fruit, final_fruit_item.amount]
-                    ),
-                    routing_key=r_key
-                )
+            agg_index = self._aggregator_index(final_fruit_item.fruit)
+            exchange, r_key = self.data_output_exchanges[agg_index]
+            exchange.send(
+                message_protocol.internal.serialize(
+                    client_id, [final_fruit_item.fruit, final_fruit_item.amount]
+                ),
+                routing_key=r_key
+            )
 
         logging.info(f"Sending EOF for client {client_id}")
         for exchange, r_key in self.data_output_exchanges:
@@ -75,7 +81,8 @@ class SumFilter:
             self._process_data(client_id, *data)
             ack()
         else:
-            for control_queue in self.control_outputs:
+            self._process_eof(client_id)
+            for control_queue in self.other_control_outputs:
                 control_queue.send(
                     message_protocol.internal.serialize(client_id, [])
                 )

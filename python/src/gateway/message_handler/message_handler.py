@@ -6,6 +6,7 @@ from common import message_protocol
 class MessageHandler:
     def __init__(self):
         self.client_id = str(uuid.uuid4())
+        logging.info(f"Client ID: {self.client_id}")
 
     def serialize_data_message(self, message):
         [fruit, amount] = message
