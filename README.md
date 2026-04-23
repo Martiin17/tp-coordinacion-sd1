@@ -79,3 +79,43 @@ Al momento de la evaluación y ejecución de las pruebas se **descartarán** o *
 - La implementación del protocolo de comunicación externo y `FruitItem`.
 
 Redactar un breve informe explicando el modo en que se coordinan las instancias de Sum y Aggregation, así como el modo en el que el sistema escala respecto a los clientes y a la cantidad de controles.
+
+
+# Informe
+
+
+## Coordinación entre instancias de Sum
+
+Cada instancia de Sum recibe una porción de los mensajes de datos gracias al mecanismo de distribución round-robin de RabbitMQ sobre la `INPUT_QUEUE` compartida. Cada instancia acumula localmente los totales por fruta para cada `client_id`.
+
+Ante el problema de la notificación del EOF: el Gateway envía un único mensaje EOF a la `INPUT_QUEUE`, que lo recibe una sola instancia de Sum. Para que todas las instancias procesen su propio EOF, las instancias de Sum se comunican entre sí mediante colas de control dedicadas.
+
+Cada instancia `i` declara y consume una cola propia llamada `SUM_CONTROL_QUEUE_i`. Estas colas son distintas de la `INPUT_QUEUE` de datos — no las usa el Gateway, sino exclusivamente las otras instancias de Sum para notificarse entre sí. Cada instancia suscribe su cola de control en el mismo canal de RabbitMQ que su cola de datos, de modo que ambas se consumen en el mismo event loop sin necesidad de threads adicionales.
+
+Cuando la instancia `X` recibe el EOF del Gateway en su `INPUT_QUEUE`, el flujo es el siguiente: primero procesa su propio EOF inmediatamente — calcula sus totales acumulados y los envía al Aggregation — y luego publica un mensaje EOF de control en las colas `SUM_CONTROL_QUEUE_i` de todas las demás instancias (`i ≠ X`). Cada una de esas instancias, al recibir el mensaje de control en su event loop, procesa su propio EOF de la misma forma.
+
+El hecho de que la instancia `X` se procese a sí misma directamente — y no a través de su propia cola de control — es clave para evitar una race condition: si `X` publicara en su propia cola de control, el mensaje podría procesarse antes de que `X` terminara de consumir todos los mensajes de datos pendientes en su `INPUT_QUEUE`. Al procesar el EOF directamente y solo notificar a las demás, se garantiza el orden correcto en todos los casos.
+
+Para distribuir el trabajo hacia Aggregation sin redundancia, cada fruta se enruta a un único Aggregator determinado por `sum(fruta.encode()) % AGGREGATION_AMOUNT`. El EOF, en cambio, se envía en broadcast a todos los Aggregators ya que cada uno necesita contarlo.
+
+## Coordinación entre instancias de Aggregation
+
+Cada instancia de Aggregation recibe datos de un subconjunto disjunto de frutas — aquellas cuyo hash corresponde a su ID — y acumula los totales consolidando aportes de todas las instancias de Sum.
+
+Como cada instancia de Sum envía un EOF al terminar, cada Aggregator espera recibir exactamente `SUM_AMOUNT` EOFs antes de calcular su top parcial. Esto se implementa con un contador `eof_count_by_client` por `client_id`: recién al llegar al valor esperado se calcula el top y se envía al Joiner.
+
+Este diseño garantiza que cuando el Aggregator calcula su top parcial, ya recibió todos los datos de todas las instancias de Sum para ese cliente.
+
+## Coordinación en el Joiner
+
+El Joiner recibe un top parcial de cada Aggregator — uno por instancia — y los consolida en un top global. Como las frutas están particionadas sin superposición entre Aggregators, no hay sumas que realizar: simplemente se mergean las listas ordenadas y se toman los `TOP_SIZE` elementos de mayor cantidad. El resultado final se envía al Gateway una única vez por cliente, recién cuando llegaron los `AGGREGATION_AMOUNT` tops parciales.
+
+## Escalabilidad respecto a los clientes
+
+Cada mensaje interno lleva un `client_id` (UUID generado por el Gateway al conectarse cada cliente) que viaja a través de todo el pipeline. Cada componente — Sum, Aggregation y Joiner — mantiene estructuras de datos separadas por `client_id`, por lo que múltiples consultas de distintos clientes pueden estar en vuelo simultáneamente sin interferir entre sí. El Gateway maneja cada cliente en un proceso separado del pool y despacha el resultado al socket correcto al recibir la respuesta identificada por `client_id`.
+
+## Escalabilidad respecto a la cantidad de controles
+
+Al aumentar `SUM_AMOUNT`, RabbitMQ distribuye automáticamente más trabajo entre las instancias. El mecanismo de colas de control individuales por instancia escala linealmente — cada nueva instancia de Sum crea su propia `SUM_CONTROL_QUEUE_i` y cada instancia existente publica en ella al recibir un EOF.
+
+Al aumentar `AGGREGATION_AMOUNT`, el hash routing redistribuye las frutas entre más particiones. El Joiner ajusta automáticamente cuántos tops parciales esperar antes de calcular el resultado final.
